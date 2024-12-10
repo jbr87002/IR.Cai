@@ -2,6 +2,7 @@
 print_csv spectra scaling_factor summary
 minimum_wavenumber 1250
 maximum_wavenumber 1600
+scale_spectra_vertically True
 defined_scaling_factor 0.98
 min_scale_factor 0.95
 temperature 300

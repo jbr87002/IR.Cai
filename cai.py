@@ -1,6 +1,7 @@
 #!/usr/bin/python
 
 import sys
+import numpy as np
 import os
 from csv import writer
 from math import exp, sqrt
@@ -17,6 +18,7 @@ class IRAnalysis:
         self.molecule_title = Path(config_file).stem
         self.minimum_wavenumber = 1000.0
         self.maximum_wavenumber = 2000.0
+        self.scale_spectra_vertically = False
         self.hwhm_lor_broad = 5.0
         self.temperature = 300.0
         self.R_in_hartrees = 0.0000031668
@@ -92,6 +94,7 @@ class IRAnalysis:
             "broadening": ("hwhm_lor_broad", float),
             "minimum_wavenumber": ("minimum_wavenumber", float),
             "maximum_wavenumber": ("maximum_wavenumber", float),
+            "scale_spectra_vertically": ("scale_spectra_vertically", lambda x: x.lower() != "false"),
             "temperature": ("temperature", float),
             "defined_scaling_factor": ("defined_scaling_factor", float),
             "max_scale_factor": ("max_scale_factor", float),
@@ -189,23 +192,50 @@ class IRAnalysis:
         return calc_energy, dft, basis_set, optimise
 
     def lorentzian(self, expt_wavenums, calc_spectrum_wavenumbers, calc_spectrum_wnintensity, hwhm_lor_broad, scaling_factor):
-        lor_data = []
-        for wavenumber in expt_wavenums:
-            lor_data.append(0.0)
-            for i_peak in range(len(calc_spectrum_wavenumbers)):
-                x_value = 2.0 * (wavenumber - calc_spectrum_wavenumbers[i_peak] * scaling_factor) / hwhm_lor_broad
-                lor_data[-1] += calc_spectrum_wnintensity[i_peak] / (1 + x_value * x_value)
-        return lor_data
+        expt_arr = np.array(expt_wavenums)
+        peak_wavenums = np.array(calc_spectrum_wavenumbers) * scaling_factor
+        peak_intensities = np.array(calc_spectrum_wnintensity)
+
+        # We want to compute the sum over all peaks:
+        #   For each experimental wavenumber w, compute:
+        #       lor_data(w) = Σ (peak_intensities[i] / (1 + x_value^2))
+        #   where x_value = 2*(w - peak_wavenums[i])/hwhm_lor_broad
+        
+        # do this by broadcasting. 
+        # expt_arr is shape (N,) and peak_wavenums is shape (M,). 
+        # After reshaping, we can broadcast them to (N, M).
+        w_matrix = expt_arr[:, np.newaxis]       # shape (N, 1)
+        peaks_matrix = peak_wavenums[np.newaxis, :] # shape (1, M)
+
+        # Compute x_value for all combinations of expt wavenumbers and peak wavenumbers.
+        x_value = 2.0 * (w_matrix - peaks_matrix) / hwhm_lor_broad
+
+        # Compute denominator for all combos
+        denom = 1.0 + x_value**2
+
+        # peak_intensities to (1, M) for broadcasting
+        intensities_matrix = peak_intensities[np.newaxis, :] # shape (1, M)
+
+        # Sum over the second axis (peaks) to get final lor_data for each expt wavenumber
+        lor_data = np.sum(intensities_matrix / denom, axis=1)
+
+        return lor_data.tolist()  # Convert back to list
 
     def match_score_calc(self, calc_signals, expt_signals):
-        sum_alfacalc = 0.0
-        sum_calc2 = 0.0
-        sum_a2 = 0.0
-        for i in range(len(calc_signals)):
-            sum_alfacalc += calc_signals[i] * expt_signals[i]
-            sum_calc2 += calc_signals[i] * calc_signals[i]
-            sum_a2 += expt_signals[i] * expt_signals[i]
-        return [sum_alfacalc / sqrt(sum_calc2 * sum_a2), sum_alfacalc]
+        calc_arr = np.array(calc_signals)
+        expt_arr = np.array(expt_signals)
+
+        # If scale_spectra_vertically is True, take the sqrt of intensities before calculating match score
+        if self.scale_spectra_vertically:
+            calc_arr = np.sqrt(calc_arr)
+            expt_arr = np.sqrt(expt_arr)
+
+        sum_alfacalc = np.sum(calc_arr * expt_arr)
+        sum_calc2 = np.sum(calc_arr**2)
+        sum_a2 = np.sum(expt_arr**2)
+
+        ir_cai = sum_alfacalc / np.sqrt(sum_calc2 * sum_a2)
+        return [ir_cai, sum_alfacalc]
 
     def print_graph_files(self, ir_cai, scale_factor):
         fig, ax1 = plt.subplots(1, 1)
