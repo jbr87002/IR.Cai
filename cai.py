@@ -18,7 +18,7 @@ class IRAnalysis:
         self.molecule_title = Path(config_file).stem
         self.minimum_wavenumber = 1000.0
         self.maximum_wavenumber = 2000.0
-        self.hwhm_lor_broad = 5.0
+        self.hwhm_lor_broad = [5.0]
         self.temperature = 300.0
         self.R_in_hartrees = 0.0000031668
         self.defined_scaling_factor = 0.975
@@ -88,9 +88,14 @@ class IRAnalysis:
             self.parse_setting(line)
 
     def parse_setting(self, line):
+        def parse_list(value):
+            for item in value.strip('[]').split(","):
+                print(item)
+            return [int(item.strip()) for item in value.strip('[]').split(",")]
+        
         settings_map = {
             "title:": ("molecule_title", str),
-            "broadening": ("hwhm_lor_broad", float),
+            "broadening": ("hwhm_lor_broad", parse_list),
             "minimum_wavenumber": ("minimum_wavenumber", float),
             "maximum_wavenumber": ("maximum_wavenumber", float),
             "temperature": ("temperature", float),
@@ -203,16 +208,16 @@ class IRAnalysis:
         return lor_data.tolist()
 
     def match_score_calc(self, calc_signals, expt_signals):
-        sum_alfacalc = 0.0
-        sum_calc2 = 0.0
-        sum_a2 = 0.0
-        for i in range(len(calc_signals)):
-            sum_alfacalc += calc_signals[i] * expt_signals[i]
-            sum_calc2 += calc_signals[i] * calc_signals[i]
-            sum_a2 += expt_signals[i] * expt_signals[i]
-        return [sum_alfacalc / sqrt(sum_calc2 * sum_a2), sum_alfacalc]
+        calc_signals = np.array(calc_signals)
+        expt_signals = np.array(expt_signals)
 
-    def print_graph_files(self, ir_cai, scale_factor):
+        sum_alfacalc = np.dot(calc_signals, expt_signals)
+        sum_calc2 = np.dot(calc_signals, calc_signals)
+        sum_a2 = np.dot(expt_signals, expt_signals)
+
+        return [sum_alfacalc / np.sqrt(sum_calc2 * sum_a2), sum_alfacalc]
+
+    def print_graph_files(self, ir_cai, scale_factor, hwhm):
         fig, ax1 = plt.subplots(1, 1)
         if self.reverse_xaxis:
             ax1.invert_xaxis()
@@ -225,7 +230,7 @@ class IRAnalysis:
         ax1.plot(self.expt_wavenums, scale_ir_calc_signals, label='IR calc', color='cyan')
         ax1.legend()
         ax1.set_xlabel('wavenumbers')
-        fig.savefig(self.config_file.split(".")[0] + '.pdf')
+        fig.savefig(self.config_file.split(".")[0] + f'_hwhm_{hwhm}.pdf')
         plt.close(fig)
 
     def read_experimental_data(self):
@@ -338,10 +343,10 @@ class IRAnalysis:
                             self.calc_energies_unique[0])
         self.logger.info("")
 
-    def calculate_signals(self):
-        self.calc_signals = self.lorentzian(self.expt_wavenums, self.calc_spectrum_wavenumbers_boltz, self.calc_spectrum_wnintensity_boltz, self.hwhm_lor_broad, self.defined_scaling_factor)
+    def calculate_signals(self, hwhm):
+        self.calc_signals = self.lorentzian(self.expt_wavenums, self.calc_spectrum_wavenumbers_boltz, self.calc_spectrum_wnintensity_boltz, hwhm, self.defined_scaling_factor)
 
-    def perform_scaling_factor_analysis(self):
+    def perform_scaling_factor_analysis(self, hwhm):
         best_sf_ir_cai = 0.0
         best_sf_ir = 1.0
 
@@ -356,7 +361,7 @@ class IRAnalysis:
                 if scaling_factor > self.max_scale_factor:
                     scaling_factor = self.max_scale_factor
 
-                self.calc_signals = self.lorentzian(self.expt_wavenums, self.calc_spectrum_wavenumbers_boltz, self.calc_spectrum_wnintensity_boltz, self.hwhm_lor_broad, scaling_factor)
+                self.calc_signals = self.lorentzian(self.expt_wavenums, self.calc_spectrum_wavenumbers_boltz, self.calc_spectrum_wnintensity_boltz, hwhm, scaling_factor)
                 ir_cai = self.match_score_calc(self.calc_signals, self.ir_expt_signals)[0]
 
                 if best_sf_ir_cai < ir_cai:
@@ -364,10 +369,10 @@ class IRAnalysis:
                     best_sf_ir = scaling_factor
 
         # Calculate match score using the defined scaling factor
-        self.calc_signals = self.lorentzian(self.expt_wavenums, self.calc_spectrum_wavenumbers_boltz, self.calc_spectrum_wnintensity_boltz, self.hwhm_lor_broad, self.defined_scaling_factor)
+        self.calc_signals = self.lorentzian(self.expt_wavenums, self.calc_spectrum_wavenumbers_boltz, self.calc_spectrum_wnintensity_boltz, hwhm, self.defined_scaling_factor)
         defined_sf_ir_cai = self.match_score_calc(self.calc_signals, self.ir_expt_signals)[0]
 
-        output_file = open(self.config_file.split(".")[0] + "_output.csv", 'w')
+        output_file = open(self.config_file.split(".")[0] + f"_output_hwhm_{hwhm}.csv", 'w')
         print(f"wavenumbers,ir_data,ir_calc,SF {self.defined_scaling_factor:5.3f}", file=output_file)
         for i in range(len(self.expt_wavenums)):
             print(f"{self.expt_wavenums[i]}, {self.ir_expt_signals[i]}, {self.calc_signals[i]}", file=output_file)
@@ -375,13 +380,14 @@ class IRAnalysis:
 
         return best_sf_ir, best_sf_ir_cai, defined_sf_ir_cai
 
-    def log_results(self, best_sf_ir, best_sf_ir_cai, defined_sf_ir_cai):
+    def log_results(self, best_sf_ir, best_sf_ir_cai, defined_sf_ir_cai, hwhm):
         self.logger.info(f'Best SF:      SF = {best_sf_ir:.4f}, IR.Cai = {best_sf_ir_cai:.4f}')
 
         self.logger.info(f'Defined SF:   SF = {self.defined_scaling_factor:.4f}, IR.Cai = {defined_sf_ir_cai:.4f}')
 
         if self.save_path:
-            with open(self.save_path, 'a') as f:
+            save_path = self.save_path.replace('.csv', f'_hwhm_{hwhm}.csv')
+            with open(save_path, 'a') as f:
                 writer_object = writer(f)
                 cwd = os.getcwd()
                 molecule = os.path.basename(cwd)
@@ -389,7 +395,9 @@ class IRAnalysis:
                 writer_object.writerow(result)
 
     def analyse(self):
+        
         self.parse_config()
+        
         output_string = (
             "##########################################\n"
             "##          IR.Cai analysis             ##\n"
@@ -399,13 +407,19 @@ class IRAnalysis:
         self.logger.info(self.config_file + "\n")
 
         self.read_experimental_data()
-        self.read_calculation_files()
-        self.calculate_signals()
-        best_sf_ir, best_sf_ir_cai, defined_sf_ir_cai = self.perform_scaling_factor_analysis()
-        self.log_results(best_sf_ir, best_sf_ir_cai, defined_sf_ir_cai)
 
-        if self.print_graph:
-            self.print_graph_files(defined_sf_ir_cai, self.defined_scaling_factor)
+        self.read_calculation_files()
+
+        for hwhm in self.hwhm_lor_broad:
+            self.logger.info(f"\nCalculating IR.Cai with HWHM = {hwhm}")
+            self.calculate_signals(hwhm)
+
+            best_sf_ir, best_sf_ir_cai, defined_sf_ir_cai = self.perform_scaling_factor_analysis(hwhm)
+
+            self.log_results(best_sf_ir, best_sf_ir_cai, defined_sf_ir_cai, hwhm)
+
+            if self.print_graph:
+                self.print_graph_files(defined_sf_ir_cai, self.defined_scaling_factor, hwhm)
 
 if __name__ == '__main__':
     config_file = sys.argv[1]
