@@ -348,6 +348,10 @@ class IRAnalysis:
 
     def calculate_signals(self, hwhm):
         self.calc_signals = self.lorentzian(self.expt_wavenums, self.calc_spectrum_wavenumbers_boltz, self.calc_spectrum_wnintensity_boltz, hwhm, self.defined_scaling_factor)
+        
+        # apply square root scaling to calc and expt signals
+        self.calc_signals = np.sqrt(self.calc_signals)
+        self.ir_expt_signals = np.sqrt(self.ir_expt_signals)
 
     def perform_scaling_factor_analysis(self, hwhm):
         best_sf_ir_cai = 0.0
@@ -413,8 +417,11 @@ class IRAnalysis:
 
         self.read_calculation_files()
 
+        original_expt_signals = self.ir_expt_signals
+
         for hwhm in self.hwhm_lor_broad:
             self.logger.info(f"\nCalculating IR.Cai with HWHM = {hwhm}")
+            self.ir_expt_signals = np.array(original_expt_signals)
             self.calculate_signals(hwhm)
 
             best_sf_ir, best_sf_ir_cai, defined_sf_ir_cai = self.perform_scaling_factor_analysis(hwhm)
