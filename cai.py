@@ -3,6 +3,7 @@
 import sys
 import os
 from csv import writer
+import numpy as np
 from math import exp, sqrt
 from pathlib import Path
 import logging
@@ -189,13 +190,17 @@ class IRAnalysis:
         return calc_energy, dft, basis_set, optimise
 
     def lorentzian(self, expt_wavenums, calc_spectrum_wavenumbers, calc_spectrum_wnintensity, hwhm_lor_broad, scaling_factor):
-        lor_data = []
-        for wavenumber in expt_wavenums:
-            lor_data.append(0.0)
-            for i_peak in range(len(calc_spectrum_wavenumbers)):
-                x_value = 2.0 * (wavenumber - calc_spectrum_wavenumbers[i_peak] * scaling_factor) / hwhm_lor_broad
-                lor_data[-1] += calc_spectrum_wnintensity[i_peak] / (1 + x_value * x_value)
-        return lor_data
+        expt_wavenums = np.array(expt_wavenums)
+        calc_spectrum_wavenumbers = np.array(calc_spectrum_wavenumbers) * scaling_factor
+        calc_spectrum_wnintensity = np.array(calc_spectrum_wnintensity)
+
+        # Create a 2D array where each row corresponds to an experimental wavenumber
+        x_values = 2.0 * (expt_wavenums[:, np.newaxis] - calc_spectrum_wavenumbers) / hwhm_lor_broad
+
+        # Calculate the Lorentzian values
+        lor_data = np.sum(calc_spectrum_wnintensity / (1 + x_values**2), axis=1)
+
+        return lor_data.tolist()
 
     def match_score_calc(self, calc_signals, expt_signals):
         sum_alfacalc = 0.0
