@@ -4,6 +4,8 @@ import sys
 import os
 from csv import writer
 import numpy as np
+from scipy import sparse
+from scipy.sparse.linalg import spsolve
 from math import exp, sqrt
 from pathlib import Path
 import logging
@@ -236,6 +238,84 @@ class IRAnalysis:
     def read_experimental_data(self):
         self.expt_wavenums, self.ir_expt_signals = self.get_ir_data(self.ir_expt_file, self.minimum_wavenumber, self.maximum_wavenumber)
 
+    @staticmethod
+    def baseline_ials(xy, lam, lam1, p, name):
+        # S. He, W. Zhang, L. Liu, Y. Huang, J. He, W. Xie, P. Wu, and C. Du, Anal. Methods 6, 4402 (2014).
+        # code idea from     # https://stackoverflow.com/questions/29156532/python-baseline-correction-library
+        '''xy is a Nx2 array, 10^2<lam<10^6, lam1<10^-4 (smoothness param) and p the asymmetry param (p<0.1)'''
+        # xy[:] = xy[:, ~np.isnan(xy[:,1])]
+        # xy = xy[~np.isnan(xy).any(axis=1)]
+        y = xy[:,1]
+        L = len(y)
+        D = sparse.diags([1,-2,1],[0,-1,-2], shape=(L,L-2))
+        D1 = sparse.diags([1,-1],[0,-1], shape=(L,L-1))
+        w = np.ones(L)
+        w0 = np.ones(L)*2.
+        wthresh = 1e-4
+        count = 0
+        while np.linalg.norm((w-w0)/w0) > wthresh: # RMS threshold 
+            count += 1
+            w0 = np.copy(w) # safe "old" w
+            W = sparse.spdiags(w, 0, L, L)
+            Z = W.dot(W.transpose()) + lam1*D1.dot(D1.transpose()) + lam*D.dot(D.transpose())
+            Z1 = W.dot(W.transpose()) + lam1*D1.dot(D1.transpose())
+            z = spsolve(Z, Z1.dot(y))
+            w = p * (y > z) + (1-p) * (y < z)
+            if count > 100: break
+        #print(count)
+        
+        return np.vstack([xy[:,0],z]).T
+
+    def baseline_correction_experimental_data(self, lam=3e5, lam1=1e-4, p=0.04, save_dir=''):
+        """
+        Removes the baseline from the experimental IR signals using iterative asym. least squares.
+        
+        Parameters
+        ----------
+        lam : float
+            Smoothness parameter for baseline correction.
+        lam1 : float
+            Secondary smoothness parameter for baseline correction.
+        p : float
+            Asymmetry parameter (between 0 and 1) controlling how aggressively baseline is fit.
+        save_dir : str
+            If not empty, plots the original and baseline-corrected signals to this directory.
+            
+        Returns
+        -------
+        corrected_wavenums : np.array
+            The wavenumbers (same as self.expt_wavenums)
+        corrected_signals : np.array
+            The baseline-corrected, normalized signals.
+        """
+        # Stack data into Nx2 array
+        data = np.vstack((self.expt_wavenums, self.ir_expt_signals)).T
+        
+        # Get the baseline using the baseline_ials function
+        baseline_data = self.baseline_ials(data, lam=lam, lam1=lam1, p=p, name='Experimental')
+        
+        # Subtract baseline
+        corrected_signals = self.ir_expt_signals - baseline_data[:,1]
+        
+        # Optionally remove negatives and normalize if desired
+        corrected_signals -= np.nanmin(corrected_signals)  # Shift so min = 0
+        corrected_signals /= np.nanmax(corrected_signals)  # Normalize so max = 1
+
+        if save_dir:
+            print(f"Saving baseline correction to {save_dir}")
+            plt.figure(figsize=(10,6))
+            plt.plot(self.expt_wavenums, self.ir_expt_signals, 'k--', label='Raw Data')
+            plt.plot(self.expt_wavenums, baseline_data[:,1], 'r--', label='Baseline')
+            plt.plot(self.expt_wavenums, corrected_signals, 'b', label='Corrected')
+            plt.xlabel('Wavenumber (cm$^{-1}$)')
+            plt.ylabel('Normalized Intensity')
+            plt.title('Baseline Correction')
+            plt.legend()
+            save_path = os.path.join(save_dir, 'baseline_correction.pdf')
+            plt.savefig(save_path)
+
+        return self.expt_wavenums, corrected_signals
+
     def read_calculation_files(self):
         self.update_calc_files_list()
         
@@ -407,6 +487,8 @@ class IRAnalysis:
         self.logger.info(self.config_file + "\n")
 
         self.read_experimental_data()
+
+        self.baseline_correction_experimental_data(save_dir='/Users/benji/PhD/IR.Cai_baseline_correction')
 
         self.read_calculation_files()
 
