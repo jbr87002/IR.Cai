@@ -9,7 +9,7 @@ max_scale_factor 1.0
 optimise_scaling_factor False
 boltzmann_cutoff 20.0
 broadening 12
-save_path /Users/benji/cai_refactor_testing/IR_high_hwhm_12.csv
+save_path /Users/benji/cai_refactor_testing/IR_high_fwhm_12.csv
 </Settings>
 
 <Experiments>
