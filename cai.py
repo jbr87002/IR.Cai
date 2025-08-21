@@ -51,8 +51,8 @@ class IRAnalysis:
         self.calc_spectrum_wnintensity_boltz = []
         self.count_energy_cutoff_rejects = 0
         self.save_path = ""
+        self._log_cache = {}
 
-        # Setup logger
         logging.basicConfig(
             level=logging.INFO,
             format='%(message)s',
@@ -70,10 +70,10 @@ class IRAnalysis:
             "<calculations>": self.parse_calculations,
         }
 
-        with open(self.config_file) as f:
+        with open(self.config_file, "r", encoding="utf-8", errors="ignore") as f:
             for line in f:
                 line = line.strip()
-                if line.startswith("#"):
+                if not line or line.startswith("#"):
                     continue
                 for section, parser in section_parsers.items():
                     if line.lower().startswith(section):
@@ -85,14 +85,17 @@ class IRAnalysis:
             line = line.strip()
             if line.lower().startswith("</settings>"):
                 break
+            if not line or line.startswith("#"):
+                continue
             self.parse_setting(line)
 
     def parse_setting(self, line):
         def parse_list(value):
-            for item in value.strip('[]').split(","):
-                print(item)
-            return [int(item.strip()) for item in value.strip('[]').split(",")]
-        
+            v = value.strip('[]').strip()
+            if not v:
+                return []
+            return [int(item.strip()) for item in v.split(",")]
+
         settings_map = {
             "title:": ("molecule_title", str),
             "broadening": ("fwhm_lor_broad", parse_list),
@@ -113,19 +116,21 @@ class IRAnalysis:
             "max_unique_peak_frequency_difference": ("max_vcd_frequency_difference", float),
         }
 
-        # Check for print_csv separately since it can have multiple options
         if "print_csv" in line.lower():
-            if "spectra" in line.lower():
+            ll = line.lower()
+            if "spectra" in ll:
                 self.print_spectra_csv = True
-            if "scaling_factor" in line.lower():
+            if "scaling_factor" in ll:
                 self.print_scaling_factor_csv = True
-            if "summary" in line.lower():
+            if "summary" in ll:
                 self.print_summary_csv = True
             return
 
+        lower = line.lower()
+        parts = line.split()
         for key, (attr, attr_type) in settings_map.items():
-            if key in line.lower():
-                setattr(self, attr, attr_type(line.split()[1]))
+            if key in lower and len(parts) >= 2:
+                setattr(self, attr, attr_type(parts[1]))
                 return
 
     def parse_experiments(self, f):
@@ -133,6 +138,8 @@ class IRAnalysis:
             line = line.strip()
             if line.lower().startswith("</experiments>"):
                 break
+            if not line or line.startswith("#"):
+                continue
             self.ir_expt_file = line
 
     def parse_calculations(self, f):
@@ -140,12 +147,14 @@ class IRAnalysis:
             line = line.strip()
             if line.lower().startswith("</calculations>"):
                 break
+            if not line or line.startswith("#"):
+                continue
             self.calc_files.append(line)
 
     def get_ir_data(self, spec_file, wav_min, wav_max):
         lst_wnum = []
         lst_intensity = []
-        with open(spec_file) as data_file:
+        with open(spec_file, "r", encoding="utf-8", errors="ignore") as data_file:
             for line in data_file:
                 linespace = line.replace(";", " ")
                 try:
@@ -158,21 +167,67 @@ class IRAnalysis:
                     pass
         return lst_wnum, lst_intensity
 
+    def _parse_log_file_once(self, filename, calc_file_suffix=""):
+        key = filename + calc_file_suffix
+        if key in self._log_cache:
+            return self._log_cache[key]
+
+        energy = None
+        freqs = []
+        intens = []
+        dft = "?"
+        basis = "?"
+        optimise = "Single point"
+
+        path = key
+        with open(path, "r", encoding="utf-8", errors="ignore") as f:
+            for line in f:
+                if "Sum of electronic and thermal Free Energies" in line:
+                    try:
+                        energy = float(line.split()[-1])
+                    except:
+                        pass
+                elif "optimizer" in line:
+                    optimise = "Optimized"
+                elif "freq=VCD" in line:
+                    try:
+                        method = line.split()[1]
+                        if "/" in method:
+                            dft, basis = method.split("/", 1)
+                    except:
+                        pass
+                elif "Frequencies" in line:
+                    parts = line.split()
+                    for i in range(2, len(parts)):
+                        try:
+                            freqs.append(float(parts[i]))
+                        except:
+                            pass
+                elif "IR Inten" in line:
+                    parts = line.split()
+                    for i in range(3, len(parts)):
+                        try:
+                            intens.append(float(parts[i]))
+                        except:
+                            pass
+
+        if energy is None:
+            energy = 0.0
+
+        entry = {
+            "energy": float(energy),
+            "freqs": np.asarray(freqs, dtype=float),
+            "ints": np.asarray(intens, dtype=float),
+            "dft": dft,
+            "basis": basis,
+            "optimise": optimise,
+        }
+        self._log_cache[key] = entry
+        return entry
+
     def get_calc_ir_data(self, calc_file, wav_min, wav_max, calc_file_suffix):
-        calc_data_wavenumber = []
-        calc_data_intensity = []
-        try:
-            with open(calc_file + calc_file_suffix) as f:
-                for line in f:
-                    if "Frequencies" in line:
-                        for i in range(2, len(line.split())):
-                            calc_data_wavenumber.append(float(line.split()[i].strip()))
-                    if "IR Inten" in line:
-                        for i in range(3, len(line.split())):
-                            calc_data_intensity.append(float(line.split()[i].strip()))
-        except IOError as e:
-            self.logger.error(f"File open error for: {calc_file}{calc_file_suffix}")
-        return calc_data_wavenumber, calc_data_intensity
+        entry = self._parse_log_file_once(calc_file, calc_file_suffix)
+        return entry["freqs"].tolist(), entry["ints"].tolist()
 
     def get_calc_energy(self, calc_files, calc_file_suffix):
         calc_energy = []
@@ -180,41 +235,40 @@ class IRAnalysis:
         dft = "?"
         basis_set = "?"
         for filename in calc_files:
-            check_energy_calc = len(calc_energy)
-            with open(filename + calc_file_suffix) as f:
-                for line in f:
-                    if "Sum of electronic and thermal Free Energies" in line:
-                        calc_energy.append(float(line.split()[-1]))
-                    elif "optimizer" in line:
-                        optimise = "Optimized"
-                    elif "freq=VCD" in line:
-                        basis_set = line.split()[1].split("/")[1]
-                        dft = line.split()[1].split("/")[0]
-                if len(calc_energy) == check_energy_calc:
-                    calc_energy.append(0.000)
+            entry = self._parse_log_file_once(filename, calc_file_suffix)
+            calc_energy.append(entry["energy"])
+            if entry["dft"]:
+                dft = entry["dft"]
+            if entry["basis"]:
+                basis_set = entry["basis"]
+            if entry["optimise"]:
+                optimise = entry["optimise"]
         return calc_energy, dft, basis_set, optimise
 
     def lorentzian(self, expt_wavenums, calc_spectrum_wavenumbers, calc_spectrum_wnintensity, fwhm_lor_broad, scaling_factor):
         expt_wavenums = np.array(expt_wavenums)
         calc_spectrum_wavenumbers = np.array(calc_spectrum_wavenumbers) * scaling_factor
         calc_spectrum_wnintensity = np.array(calc_spectrum_wnintensity)
-
-        # Create a 2D array where each row corresponds to an experimental wavenumber
         x_values = 2.0 * (expt_wavenums[:, np.newaxis] - calc_spectrum_wavenumbers) / fwhm_lor_broad
-
-        # Calculate the Lorentzian values
         lor_data = np.sum(calc_spectrum_wnintensity / (1 + x_values**2), axis=1)
-
         return lor_data.tolist()
+
+    def _lorentzian_batch_over_scalings(self, expt_wavenums, calc_spectrum_wavenumbers, calc_spectrum_wnintensity, fwhm_lor_broad, scaling_factors):
+        expt = np.asarray(expt_wavenums, dtype=float)[:, None, None]
+        lines = np.asarray(calc_spectrum_wavenumbers, dtype=float)[None, :, None]
+        intens = np.asarray(calc_spectrum_wnintensity, dtype=float)[None, :, None]
+        s = np.asarray(scaling_factors, dtype=float)[None, None, :]
+        fwhm = float(fwhm_lor_broad)
+        x = 2.0 * (expt - lines * s) / fwhm
+        sig = np.sum(intens / (1.0 + x * x), axis=1)
+        return sig
 
     def match_score_calc(self, calc_signals, expt_signals):
         calc_signals = np.array(calc_signals)
         expt_signals = np.array(expt_signals)
-
         sum_alfacalc = np.dot(calc_signals, expt_signals)
         sum_calc2 = np.dot(calc_signals, calc_signals)
         sum_a2 = np.dot(expt_signals, expt_signals)
-
         return [sum_alfacalc / np.sqrt(sum_calc2 * sum_a2), sum_alfacalc]
 
     def print_graph_files(self, ir_cai, scale_factor, fwhm):
@@ -238,7 +292,6 @@ class IRAnalysis:
 
     def read_calculation_files(self):
         self.update_calc_files_list()
-        
         self.calc_energies, self.dft, self.basis_set, self.optimise = self.get_calc_energy(self.calc_files, '')
         self.sort_files_by_energy()
 
@@ -277,7 +330,7 @@ class IRAnalysis:
         for i in range(len(self.calc_files)):
             boltzmann_factor = exp(-(self.calc_energies[i] - self.calc_energies[0]) / self.R_in_hartrees / self.temperature)
             self.calc_boltzmann.append(boltzmann_factor)
-            
+
             filename = self.calc_files[i]
             calc_spectrum_wavenumbers, calc_spectrum_wnintensity = self.get_calc_ir_data(
                 filename, self.minimum_wavenumber, self.maximum_wavenumber, ''
@@ -323,24 +376,24 @@ class IRAnalysis:
             self.calc_spectrum_wnintensity_boltz.append(calc_spectrum_wnintensity[j] * boltzmann_factor)
 
     def log_summary(self):
-        self.logger.info("%d files rejected by energy cutoff; %d duplicate files removed", 
-                        self.count_energy_cutoff_rejects, 
-                        len(self.calc_energies) - len(self.calc_energies_unique) - self.count_energy_cutoff_rejects)
+        self.logger.info("%d files rejected by energy cutoff; %d duplicate files removed",
+                         self.count_energy_cutoff_rejects,
+                         len(self.calc_energies) - len(self.calc_energies_unique) - self.count_energy_cutoff_rejects)
 
         self.logger.info("Unique Calculated Structures")
         for i in range(len(self.calc_energies_unique)):
-            self.logger.info("     Energy: %10.6f hartrees, %6.3f kJ/mol, Boltzmann Factor: %5.3f %s", 
-                            self.calc_energies_unique[i], 
-                            (self.calc_energies_unique[i] - self.calc_energies_unique[0]) * 2625.8, 
-                            self.calc_boltzmann_unique[i], 
-                            self.calc_files_unique[i])
+            self.logger.info("     Energy: %10.6f hartrees, %6.3f kJ/mol, Boltzmann Factor: %5.3f %s",
+                             self.calc_energies_unique[i],
+                             (self.calc_energies_unique[i] - self.calc_energies_unique[0]) * 2625.8,
+                             self.calc_boltzmann_unique[i],
+                             self.calc_files_unique[i])
 
         if self.boltzmann_analysis:
             self.logger.info("Using all %d unique conformations within energy cut-off", len(self.calc_files_unique))
         else:
-            self.logger.info("Using only lowest energy conformation in analysis: %s Energy: %f", 
-                            self.calc_files_unique[0], 
-                            self.calc_energies_unique[0])
+            self.logger.info("Using only lowest energy conformation in analysis: %s Energy: %f",
+                             self.calc_files_unique[0],
+                             self.calc_energies_unique[0])
         self.logger.info("")
 
     def calculate_signals(self, fwhm):
@@ -354,21 +407,29 @@ class IRAnalysis:
             scale_factor_range = self.max_scale_factor - self.min_scale_factor
             scale_scale = 20.0 / scale_factor_range if scale_factor_range > 0.001 else 20000
 
-            for scaling_factor_scale in range(int(self.min_scale_factor * scale_scale), int(self.max_scale_factor * scale_scale + 1.0)):
-                scaling_factor = float(scaling_factor_scale) / scale_scale
-                if scaling_factor < self.min_scale_factor:
-                    scaling_factor = self.min_scale_factor
-                if scaling_factor > self.max_scale_factor:
-                    scaling_factor = self.max_scale_factor
+            sf_min_i = int(self.min_scale_factor * scale_scale)
+            sf_max_i = int(self.max_scale_factor * scale_scale + 1.0)
+            grid_i = np.arange(sf_min_i, sf_max_i, dtype=int)
+            s_candidates = np.clip(grid_i.astype(float) / scale_scale, self.min_scale_factor, self.max_scale_factor)
 
-                self.calc_signals = self.lorentzian(self.expt_wavenums, self.calc_spectrum_wavenumbers_boltz, self.calc_spectrum_wnintensity_boltz, fwhm, scaling_factor)
-                ir_cai = self.match_score_calc(self.calc_signals, self.ir_expt_signals)[0]
+            sig_mat = self._lorentzian_batch_over_scalings(
+                self.expt_wavenums,
+                self.calc_spectrum_wavenumbers_boltz,
+                self.calc_spectrum_wnintensity_boltz,
+                fwhm,
+                s_candidates
+            )
+            expt = np.asarray(self.ir_expt_signals, dtype=float)
+            expt_norm = np.sqrt(np.dot(expt, expt)) if expt.size else 1.0
+            dots = expt @ sig_mat
+            norms = np.sqrt(np.sum(sig_mat * sig_mat, axis=0))
+            denom = np.maximum(expt_norm * norms, 1e-30)
+            scores = dots / denom
 
-                if best_sf_ir_cai < ir_cai:
-                    best_sf_ir_cai = ir_cai
-                    best_sf_ir = scaling_factor
+            best_idx = int(np.argmax(scores)) if scores.size else 0
+            best_sf_ir_cai = float(scores[best_idx]) if scores.size else 0.0
+            best_sf_ir = float(s_candidates[best_idx]) if s_candidates.size else self.defined_scaling_factor
 
-        # Calculate match score using the defined scaling factor
         self.calc_signals = self.lorentzian(self.expt_wavenums, self.calc_spectrum_wavenumbers_boltz, self.calc_spectrum_wnintensity_boltz, fwhm, self.defined_scaling_factor)
         defined_sf_ir_cai = self.match_score_calc(self.calc_signals, self.ir_expt_signals)[0]
 
@@ -382,7 +443,6 @@ class IRAnalysis:
 
     def log_results(self, best_sf_ir, best_sf_ir_cai, defined_sf_ir_cai, fwhm):
         self.logger.info(f'Best SF:      SF = {best_sf_ir:.4f}, IR.Cai = {best_sf_ir_cai:.4f}')
-
         self.logger.info(f'Defined SF:   SF = {self.defined_scaling_factor:.4f}, IR.Cai = {defined_sf_ir_cai:.4f}')
 
         if self.save_path:
@@ -395,9 +455,8 @@ class IRAnalysis:
                 writer_object.writerow(result)
 
     def analyse(self):
-        
         self.parse_config()
-        
+
         output_string = (
             "##########################################\n"
             "##          IR.Cai analysis             ##\n"
@@ -407,7 +466,6 @@ class IRAnalysis:
         self.logger.info(self.config_file + "\n")
 
         self.read_experimental_data()
-
         self.read_calculation_files()
 
         for fwhm in self.fwhm_lor_broad:
@@ -415,13 +473,15 @@ class IRAnalysis:
             self.calculate_signals(fwhm)
 
             best_sf_ir, best_sf_ir_cai, defined_sf_ir_cai = self.perform_scaling_factor_analysis(fwhm)
-
             self.log_results(best_sf_ir, best_sf_ir_cai, defined_sf_ir_cai, fwhm)
 
             if self.print_graph:
                 self.print_graph_files(defined_sf_ir_cai, self.defined_scaling_factor, fwhm)
 
 if __name__ == '__main__':
+    if len(sys.argv) < 2:
+        print("Usage: python cai.py <config_file>")
+        sys.exit(1)
     config_file = sys.argv[1]
     analysis = IRAnalysis(config_file)
     analysis.analyse()
